@@ -7,10 +7,10 @@
 //
 //
 // To Compile (on linux):
-//   g++ -Wall -L/usr/lib64 -ltiff -o ConvertLeicaSCN400F ConvertLeicaSCN400F.cc
+//   g++ -Wall -L/usr/lib64 -ltiff -lxml2 -o ConvertLeicaSCN400F ConvertLeicaSCN400F.cc
 //
-//   Note: libtiff 4 or higher must be installed on your computer
-//         Replace /usr/lib64 with the location of libtiff 4 libraries on your computer
+//   Note: libtiff 4 or higher and libxml2 must be installed on your computer
+//         Replace /usr/lib64 with the location of libtiff 4 and libxml2 libraries on your computer
 //
 //
 // To Run (on linux):
@@ -34,6 +34,12 @@
 //                      DDDDD = The number of pixels in the Y dimension
 //                      File format = Binary, Unsigned 8 Bit Integer
 //
+//   Exit Codes:
+//     0: Success
+//     1: Could not open Leica .scn file
+//     2: Could not parse XML description in .scn file
+//     3: Could not read image from Leica .scn file
+//     4: Could not allocate memory for image
 //
 // Notes about reading highest resolution pixel data from Leica fluorescence images:
 // [Information from Benjamin Gilbert @ OpenSlide]
@@ -72,7 +78,12 @@
 
 extern "C" {
   #include <tiffio.h>
+  #include <libxml/tree.h>
+  #include <libxml/parser.h>
+  #include <libxml/xpath.h>
 }
+#include <stdio.h>
+#include <stdlib.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -83,10 +94,31 @@ extern "C" {
 #include <ctime>
 using namespace std;
 
+// Error Codes
+// Exit Code: 0 = Success
+void Error_TIFFOpen(void)
+{
+  cout << "ERROR (ConvertLeicaSCN400F.cc): Could Not Open Leica .SCN File." << endl;
+} // Exit Code: 1
+void Error_XMLParse(void)
+{
+  cout << "ERROR (ConvertLeicaSCN400F.cc): Could Not Parse XML Description." << endl;
+} // Exit Code: 2
+void Error_ImageRead(void)
+{
+  cout << "ERROR (ConvertLeicaSCN400F.cc): Could Not Read Image From .SCN File." << endl;
+} // Exit Code: 3
+void Error_MemoryAllocate(void)
+{
+  cout << "ERROR (ConvertLeicaSCN400F.cc): Could Not Allocate Memory For Image." << endl;
+} // Exit Code: 4
+
 int main (int argc, char * argv[])
 {
 
+  //////////////////////////////////////////////////////////////////////////////////////
   // Read Inputs
+  //////////////////////////////////////////////////////////////////////////////////////
   string fn_in, fn_outprefix;
   if (argc != 3) return -1;
   else
@@ -95,119 +127,116 @@ int main (int argc, char * argv[])
     fn_outprefix=argv[2];
   }
 
-  // Open File
-  TIFF *tif=TIFFOpen(fn_in.c_str(), "r");
 
-  // Get Image Description In First Directory
+  //////////////////////////////////////////////////////////////////////////////////////
+  // Open .scn File
+  //////////////////////////////////////////////////////////////////////////////////////
+  TIFF *tif=TIFFOpen(fn_in.c_str(), "r");
+  if (tif == NULL) {atexit(Error_TIFFOpen); exit(1);}
+
+
+  //////////////////////////////////////////////////////////////////////////////////////
+  // Get Image Description In First Directory of .scn File
+  //////////////////////////////////////////////////////////////////////////////////////
   int iTIFFdir=0;
   char *sdescription=0;
   TIFFGetField(tif,TIFFTAG_IMAGEDESCRIPTION,&sdescription);
   //cout << sdescription << endl; 
 
-  // Read Through XML Data
-  // Get TIFF Directories You Want
-  int istart=0,iend=0;
-  char *chold;
-  //int icount=0;
-  long xcollection=0,ycollection=0; bool flag_foundcollection=false;
-  int ifind=0,ifind1=0,ifind2=0;
-  int carray[3]={-1,-1,-1}, darray[3]={-1,-1,-1}, iarray[3]={-1,-1,-1}, cvalue, dvalue, ivalue=0;
-  vector<int> channelID, TIFFDirectories, ImageNo;
-  string shold,shold1,shold2;
-  while (sdescription[istart] != '\0') // && icount < 100000)
+
+  //////////////////////////////////////////////////////////////////////////////////////
+  // Process XML Data
+  // Figure Out Which TIFF Directories You Want
+  //////////////////////////////////////////////////////////////////////////////////////
+
+  // Replace <scn ...> with <scn> to avoid using Leica's namespace
+  bool flag_stop=false;
+  int jj=0;
+  while (!flag_stop)
   {
-    // Get Size of Next Line
-    while (sdescription[iend] != '\n' && sdescription[iend] != '\0' && sdescription[iend] != '\r') {iend++;}
-
-    if (iend != istart) 
-    {
-      // Allocate Character Array With Enough Space  
-      chold=new char[iend-istart+1];
-
-      // Copy Data To Character Array
-      for (int ii=istart;ii<iend;ii++) {chold[ii-istart]=sdescription[ii];}
-      chold[iend-istart]='\0';
-
-      // Convert to a String
-      shold=chold;
-
-      // Look for <collection> Dimensions
-      if (!flag_foundcollection)
-      {
-        ifind=shold.find("<collection"); 
-        if (ifind != -1) 
-        {
-          ifind1=shold.find("sizeX=\"")+7;
-          ifind2=shold.find("\"",ifind1+1);
-          shold1=shold.substr(ifind1,ifind2-ifind1);
-          xcollection=atol(shold1.c_str());
-          ifind1=shold.find("sizeY=\"")+7;
-          ifind2=shold.find("\"",ifind1+1);
-          shold1=shold.substr(ifind1,ifind2-ifind1);
-          ycollection=atol(shold1.c_str());
-          flag_foundcollection=true;
-        }
-      }
-      else
-      {
-        //For Each <image> 
-        if (shold.find("<dimension ") != string::npos && shold.find(" r=\"0\"") != string::npos && shold.find(" c=") != string::npos)
-        {
-          // Save c and ifd Attributes
-          ifind1=shold.find("c=\"")+3;
-          ifind2=shold.find("\"",ifind1+1);
-          shold1=shold.substr(ifind1,ifind2-ifind1);
-          cvalue=atoi(shold1.c_str());
-          ifind1=shold.find("ifd=\"")+5;
-          ifind2=shold.find("\"",ifind1+1);
-          shold1=shold.substr(ifind1,ifind2-ifind1);
-          dvalue=atoi(shold1.c_str());
-
-          if (cvalue == 0) {carray[0]=cvalue; darray[0]=dvalue; iarray[0]=ivalue;}
-          if (cvalue == 1) {carray[1]=cvalue; darray[1]=dvalue; iarray[1]=ivalue;}
-          if (cvalue == 2) {carray[2]=cvalue; darray[2]=dvalue; iarray[2]=ivalue;}
-        }
-
-        // If <view> Size Doesn't Match Collection Size then Save Directories
-        if (shold.find("<view ") != string::npos)
-        {
-          ifind1=shold.find("sizeX=\"")+7;
-          ifind2=shold.find("\"",ifind1+1);
-          shold1=shold.substr(ifind1,ifind2-ifind1);
-
-          ifind1=shold.find("sizeY=\"")+7;
-          ifind2=shold.find("\"",ifind1+1);
-          string shold2=shold.substr(ifind1,ifind2-ifind1);
-
-          if (atol(shold1.c_str()) != xcollection && atol(shold2.c_str()) != ycollection)
-          {
-            if (carray[0] != -1) channelID.push_back(carray[0]);
-            if (carray[1] != -1) channelID.push_back(carray[1]);
-            if (carray[2] != -1) channelID.push_back(carray[2]);
-            if (darray[0] != -1) TIFFDirectories.push_back(darray[0]);
-            if (darray[1] != -1) TIFFDirectories.push_back(darray[1]);
-            if (darray[2] != -1) TIFFDirectories.push_back(darray[2]);
-            if (iarray[0] != -1) ImageNo.push_back(iarray[0]);
-            if (iarray[1] != -1) ImageNo.push_back(iarray[1]);
-            if (iarray[2] != -1) ImageNo.push_back(iarray[2]);
-            ivalue++;
-          } 
-        }
-      }
-
-      // Free Memory
-      delete [] chold;
-
-      // Initialize For Next Line
-      while (sdescription[iend] == '\n' || sdescription[iend] == '\r') {iend++;}
-      istart=iend;
-      iend=istart;
-
+    if (sdescription[jj]=='<' && sdescription[jj+1]=='s' && 
+        sdescription[jj+2]=='c' && sdescription[jj+3]=='n')
+    { 
+      jj=jj+4;
+      while (sdescription[jj] != '>') {sdescription[jj]=' '; jj++;} 
+      flag_stop=true;
     }
-    //icount++;
+    jj++;
   }
 
-  // Read Through TIFF Directories To Get The Ones You Want
+  // Parse the XML
+  int xsize=0,xi=0;
+  while (sdescription[xi] != '\0') {xsize++; xi++;}
+  xmlInitParser();
+  LIBXML_TEST_VERSION
+  xmlDocPtr xmldoc;
+  xmlXPathContextPtr xmlcontext;
+  xmlXPathObjectPtr xmlresult;
+  xmlChar *keyword;
+  xmldoc=xmlParseMemory(sdescription,xsize);
+  if (xmldoc == NULL) {atexit(Error_XMLParse); exit(2);}
+  xmlcontext=xmlXPathNewContext(xmldoc);
+
+  // Get Collection Dimensions
+  long xcollection=0,ycollection=0; 
+  xmlresult=xmlXPathEvalExpression((xmlChar *) "//collection",xmlcontext);
+  keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[0],(xmlChar *) "sizeX");
+  xcollection=atol((char *) keyword);
+  xmlFree(keyword);
+  keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[0],(xmlChar *) "sizeY");
+  ycollection=atol((char *) keyword);
+  xmlFree(keyword);
+  xmlXPathFreeObject(xmlresult);
+
+  // Save Information For All Images You Want
+  vector<int> channelID, TIFFDirectories, ImageNo;
+  long xview=0,yview=0;
+  ostringstream convert; string ssearch;
+  int icount=0;
+  jj=1; convert << "//image[" << jj << "]/view"; ssearch=convert.str();
+  xmlresult=xmlXPathEvalExpression((xmlChar *) ssearch.c_str(),xmlcontext);
+  while  (!xmlXPathNodeSetIsEmpty(xmlresult->nodesetval))
+  {
+    // Compare <view> Dimensions With <collection> Dimensions
+    keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[0],(xmlChar *) "sizeX");
+    xview=atol((char *) keyword);
+    xmlFree(keyword);
+    keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[0],(xmlChar *) "sizeY");
+    yview=atol((char *) keyword);
+    xmlFree(keyword);
+    if (xview != xcollection && yview != ycollection)
+    {
+      // Save Information For <view>s Whose Dimensions Do Not Match <collection>
+      xmlXPathFreeObject(xmlresult);
+      convert.str(""); convert.clear(); convert << "//image[" << jj << "]/pixels/dimension[@r=0]"; ssearch=convert.str(); 
+      xmlresult=xmlXPathEvalExpression((xmlChar *) ssearch.c_str(),xmlcontext);
+      for (int ii=0;ii<xmlresult->nodesetval->nodeNr;ii++)
+      {
+        keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[ii],(xmlChar *) "c");
+        channelID.push_back(atoi((char*) keyword));
+        xmlFree(keyword);
+        keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[ii],(xmlChar *) "ifd");
+        TIFFDirectories.push_back(atoi((char*) keyword));
+        xmlFree(keyword);
+        ImageNo.push_back(icount);
+      }
+      icount++;
+    }
+
+    xmlXPathFreeObject(xmlresult);
+    jj++; convert.str(""); convert.clear(); convert << "//image[" << jj << "]/view"; ssearch=convert.str(); 
+    xmlresult=xmlXPathEvalExpression((xmlChar *) ssearch.c_str(),xmlcontext);
+  }
+
+  // Clean Up
+  xmlXPathFreeContext(xmlcontext);
+  xmlFreeDoc(xmldoc);
+  xmlCleanupParser();
+
+
+  //////////////////////////////////////////////////////////////////////////////////////
+  // Get Data From .scn File
+  //////////////////////////////////////////////////////////////////////////////////////
   uint32 ww,hh;
   bool flag_dir=false;
   int iwrite;
@@ -254,9 +283,9 @@ int main (int argc, char * argv[])
             }
           }
         } 
-        else {cout << "Read: Unsuccessful" << endl;}
+        else {atexit(Error_ImageRead); exit(3);}
       }
-      else {cout << "Memory Allocation: Unsuccessful" << endl;}
+      else {atexit(Error_MemoryAllocate); exit(4);}
       _TIFFfree(raster);
 
       // Write Out Image Data In Binary Format
