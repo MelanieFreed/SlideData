@@ -4,6 +4,7 @@
 //
 // History:
 //   2015-Feb-05: M.Freed Created
+//   2016-Jan-08: M.Freed Updated to work with only a single channel
 //
 //
 // To Compile (on linux):
@@ -213,7 +214,15 @@ int main (int argc, char * argv[])
       for (int ii=0;ii<xmlresult->nodesetval->nodeNr;ii++)
       {
         keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[ii],(xmlChar *) "c");
-        channelID.push_back(atoi((char*) keyword));
+        if (keyword == NULL)
+        {
+          // No "c" property - Leica has different format in this case, so just force it
+          channelID.push_back(0);
+        }
+        else
+        {
+          channelID.push_back(atoi((char*) keyword));
+        }
         xmlFree(keyword);
         keyword=xmlGetProp(xmlresult->nodesetval->nodeTab[ii],(xmlChar *) "ifd");
         TIFFDirectories.push_back(atoi((char*) keyword));
